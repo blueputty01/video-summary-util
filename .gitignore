@@ -4,3 +4,5 @@ venv/
 
 # macOS
 .DS_Store
+
+.whisper-work

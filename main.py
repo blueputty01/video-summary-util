@@ -8,7 +8,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -114,35 +113,36 @@ def main() -> int:
     require_command("yt-dlp")
     require_command("ffmpeg")
 
-    with tempfile.TemporaryDirectory(
-        prefix="whisper-transcribe-"
-    ) as temporary_directory:
-        working_directory = Path(temporary_directory)
-        video_template = working_directory / "video.%(ext)s"
-        run_command(["yt-dlp", "--no-playlist", "-o", str(video_template), args.url])
+    working_directory = Path(__file__).resolve().parent / ".whisper-work"
+    if working_directory.exists():
+        shutil.rmtree(working_directory)
+    working_directory.mkdir()
 
-        videos = [path for path in working_directory.iterdir() if path.name != ".part"]
-        if len(videos) != 1:
-            raise RuntimeError("yt-dlp did not produce exactly one video file.")
+    video_template = working_directory / "video.%(ext)s"
+    run_command(["yt-dlp", "--no-playlist", "-o", str(video_template), args.url])
 
-        audio_path = working_directory / "audio.wav"
-        run_command(
-            [
-                "ffmpeg",
-                "-y",
-                "-i",
-                str(videos[0]),
-                "-vn",
-                "-ac",
-                "1",
-                "-ar",
-                "16000",
-                str(audio_path),
-            ]
-        )
+    videos = [path for path in working_directory.iterdir() if path.name != ".part"]
+    if len(videos) != 1:
+        raise RuntimeError("yt-dlp did not produce exactly one video file.")
 
-        model = whisper.load_model(args.model)
-        result = model.transcribe(str(audio_path), language=args.language)
+    audio_path = working_directory / "audio.wav"
+    run_command(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(videos[0]),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            str(audio_path),
+        ]
+    )
+
+    model = whisper.load_model(args.model)
+    result = model.transcribe(str(audio_path), language=args.language)
 
     transcript = result.get("text")
     if not isinstance(transcript, str):
