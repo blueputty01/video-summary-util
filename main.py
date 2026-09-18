@@ -152,7 +152,7 @@ def main() -> int:
     text = transcript.strip()
     print(text)
 
-    if args.summarize:
+    if args.summarize and len(text) > 200:
         text = summarize_with_gemini(text, args.gemini_model)
         print(text)
 
