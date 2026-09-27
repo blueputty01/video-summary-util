@@ -10,9 +10,73 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import whisper
+
+
+def identify_speakers(audio_path: Path, token: str) -> list[tuple[float, float, str]]:
+    """Return diarization turns for an audio file using pyannote.audio."""
+    try:
+        from pyannote.audio import Pipeline
+    except ImportError as error:
+        raise RuntimeError(
+            "Speaker identification requires pyannote.audio. "
+            "Install the dependencies with: pip install -r requirements.txt"
+        ) from error
+
+    pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", token=token)
+    diarization = pipeline(str(audio_path))
+    return [
+        (turn.start, turn.end, speaker)
+        for turn, _, speaker in diarization.itertracks(yield_label=True)
+    ]
+
+
+def speaker_for_segment(
+    start: float, end: float, speaker_turns: list[tuple[float, float, str]]
+) -> str:
+    """Return the speaker with the greatest overlap with a Whisper segment."""
+    speaker_overlaps: dict[str, float] = {}
+    for turn_start, turn_end, speaker in speaker_turns:
+        overlap = max(0.0, min(end, turn_end) - max(start, turn_start))
+        if overlap:
+            speaker_overlaps[speaker] = speaker_overlaps.get(speaker, 0.0) + overlap
+    if not speaker_overlaps:
+        return "UNKNOWN"
+    return max(speaker_overlaps, key=lambda speaker: speaker_overlaps[speaker])
+
+
+def format_transcript(
+    result: Mapping[str, Any], speaker_turns: list[tuple[float, float, str]] | None
+) -> str:
+    """Format Whisper segments, optionally prefixing each with a speaker label."""
+    if speaker_turns is None:
+        transcript = result.get("text")
+        if not isinstance(transcript, str):
+            raise RuntimeError("Whisper did not return a text transcript.")
+        return transcript.strip()
+
+    segments = result.get("segments")
+    if not isinstance(segments, list):
+        raise RuntimeError("Whisper did not return timestamped transcript segments.")
+
+    lines: list[str] = []
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        start = segment.get("start")
+        end = segment.get("end")
+        text = segment.get("text")
+        if not isinstance(start, (int, float)) or not isinstance(end, (int, float)):
+            continue
+        if not isinstance(text, str) or not text.strip():
+            continue
+        speaker = speaker_for_segment(float(start), float(end), speaker_turns)
+        lines.append(f"[{speaker}] {text.strip()}")
+    return "\n".join(lines)
 
 
 def run_command(command: list[str]) -> None:
@@ -93,11 +157,23 @@ def parse_args() -> argparse.Namespace:
         "--summarize",
         action="store_true",
         help="Summarize the transcript with Gemini using GEMINI_API_KEY",
+        default=True,
     )
     parser.add_argument(
         "--gemini-model",
         default="gemini-3.8-flash",
         help="Gemini model for --summarize (default: gemini-3.8-flash)",
+    )
+    parser.add_argument(
+        "--speakers",
+        action="store_true",
+        help="Identify speakers and label each transcript segment",
+        default=True,
+    )
+    parser.add_argument(
+        "--hf-token",
+        help="Hugging Face access token (defaults to HUGGINGFACE_TOKEN)",
+        default=os.environ.get("HUGGINGFACE_TOKEN"),
     )
     parser.add_argument(
         "-o",
@@ -144,12 +220,17 @@ def main() -> int:
     model = whisper.load_model(args.model)
     result = model.transcribe(str(audio_path), language=args.language)
 
-    transcript = result.get("text")
-    if not isinstance(transcript, str):
-        raise RuntimeError("Whisper did not return a text transcript.")
+    speaker_turns = None
+    if args.speakers:
+        token = args.hf_token or os.environ.get("HUGGINGFACE_TOKEN")
+        if not token:
+            raise RuntimeError(
+                "Set HUGGINGFACE_TOKEN or pass --hf-token when using --speakers."
+            )
+        speaker_turns = identify_speakers(audio_path, token)
 
     print(args.url)
-    text = transcript.strip()
+    text = format_transcript(result, speaker_turns)
     print(text)
 
     if args.summarize and len(text) > 200:
